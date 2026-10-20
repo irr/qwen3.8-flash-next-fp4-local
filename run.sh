@@ -3,17 +3,18 @@
 # on a single NVIDIA DGX Spark using eugr/spark-vllm-b12x
 #
 # Usage:
-#   export HF_TOKEN=hf_...
 #   ./run.sh                 # native 262k
 #   MAX_MODEL_LEN=1000000 ./run.sh   # 1M with YaRN (factor auto-computed = 4.0)
 #   MAX_MODEL_LEN=524288 YARN_FACTOR=2.0 ./run.sh   # explicit YaRN factor
 #
-# Requirements: Docker + NVIDIA Container Toolkit, ~100+ GB free disk, DGX Spark / GB10
+# Requirements: Docker + NVIDIA Container Toolkit, DGX Spark / GB10,
+# model weights (~96 GB) in MODEL_DIR (default ~/models/Qwen3.8-Flash-Next-FP4-Local)
 
 set -euo pipefail
 
 # ---------- configuration (override via environment) ----------
-MODEL_ID="${MODEL_ID:-nvidia/Qwen3.8-Flash-Next-FP4-Local}"
+MODEL_ID="${MODEL_ID:-nvidia/Qwen3.8-Flash-Next-FP4-Local}"    # name exposed by the API
+MODEL_DIR="${MODEL_DIR:-${HOME}/models/Qwen3.8-Flash-Next-FP4-Local}"  # local weights on the host
 IMAGE="${IMAGE:-eugr/spark-vllm-b12x:latest}"
 PORT="${PORT:-8000}"
 HOST="${HOST:-0.0.0.0}"
@@ -28,8 +29,8 @@ NATIVE_CTX=262144                                 # model's native context
 YARN_FACTOR="${YARN_FACTOR:-}"                    # empty = ceil(MAX_MODEL_LEN / NATIVE_CTX)
 
 # ---------- validate ----------
-if [ -z "${HF_TOKEN:-}" ]; then
-  echo "ERROR: HF_TOKEN is not set. Run: export HF_TOKEN=hf_..." >&2
+if [ ! -f "${MODEL_DIR}/config.json" ]; then
+  echo "ERROR: no model found in MODEL_DIR=${MODEL_DIR} (missing config.json)." >&2
   exit 1
 fi
 
@@ -52,6 +53,7 @@ fi
 
 echo "=== Qwen3.8-Flash-Next on DGX Spark ==="
 echo "Model:          ${MODEL_ID}"
+echo "Model dir:      ${MODEL_DIR}"
 echo "Image:          ${IMAGE}"
 echo "Max context:    ${MAX_MODEL_LEN} (YaRN: $([ $YARN_ENABLED -eq 1 ] && echo "ON, factor ${YARN_FACTOR}" || echo OFF))"
 echo "Max seqs:       ${MAX_NUM_SEQS}"
@@ -102,7 +104,7 @@ docker run -d \
   --ulimit stack=67108864 \
   --security-opt seccomp=unconfined \
   --security-opt apparmor=unconfined \
-  -e HF_TOKEN="${HF_TOKEN}" \
+  -e HF_HUB_OFFLINE=1 \
   -e VLLM_ALLOW_LONG_MAX_MODEL_LEN=1 \
   -e VLLM_ENGINE_READY_TIMEOUT_S=3600 \
   -e VLLM_PLE_TABLE_MEMORY=disk \
@@ -119,13 +121,15 @@ docker run -d \
   -e VLLM_B12X_MOE_FP4_LAYER_MAX_INPUT_SCALE=w13 \
   -e VLLM_B12X_MOE_FP4_FORCE_A16=1 \
   -e B12X_W4A16_A4_PREFILL=1 \
+  -v "${MODEL_DIR}:/models/model:ro" \
   -v "${HOME}/.cache/huggingface:/root/.cache/huggingface" \
   -v "${HOME}/.cache/vllm:/root/.cache/vllm" \
   -v "${HOME}/.cache/flashinfer:/root/.cache/flashinfer" \
   -v "${HOME}/.triton:/root/.triton" \
   -v "${HOME}/.cache/b12x:/root/.cache/b12x" \
   "${IMAGE}" \
-  vllm serve "${MODEL_ID}" \
+  vllm serve /models/model \
+    --served-model-name "${MODEL_ID}" \
     --host "${HOST}" \
     --port "${PORT}" \
     --tensor-parallel-size 1 \
@@ -159,7 +163,7 @@ echo "Container started: ${CONTAINER_NAME}"
 echo "Follow logs:       docker logs -f ${CONTAINER_NAME}"
 echo "API endpoint:      http://localhost:${PORT}/v1"
 echo
-echo "First launch downloads the model (~96 GB) and may take 10–20+ minutes"
+echo "First launch may take 10–20+ minutes"
 echo "(weight load + kernel autotune). Subsequent starts are much faster."
 echo
 echo "Test when ready:"

@@ -13,13 +13,19 @@ Scripts to serve [`nvidia/Qwen3.8-Flash-Next-FP4-Local`](https://huggingface.co/
 
 - NVIDIA DGX Spark / GB10 (the kernels are built for `sm_121a`)
 - Docker with the NVIDIA Container Toolkit (`--gpus all` must work)
-- Around **100+ GB free disk**. The model download is about 96 GB.
-- A Hugging Face access token in `HF_TOKEN`
+- The model weights (about 96 GB) in `~/models/Qwen3.8-Flash-Next-FP4-Local`, or another directory set with `MODEL_DIR`
 
 ## Quick start
 
+To fetch the weights the first time:
+
 ```bash
-export HF_TOKEN=hf_...
+hf download nvidia/Qwen3.8-Flash-Next-FP4-Local --local-dir ~/models/Qwen3.8-Flash-Next-FP4-Local
+```
+
+Then:
+
+```bash
 ./run.sh          # native 262k context
 ./view.sh         # follow logs until the server reports it is ready
 ```
@@ -31,6 +37,7 @@ With no overrides, the script serves the model at its **native 262,144-token con
 | Setting | Default |
 |---|---|
 | Model | `nvidia/Qwen3.8-Flash-Next-FP4-Local` |
+| Weights | `~/models/Qwen3.8-Flash-Next-FP4-Local` |
 | Image | `eugr/spark-vllm-b12x:latest` |
 | API | `http://0.0.0.0:8000/v1` |
 | Context (`MAX_MODEL_LEN`) | 262,144 (native, YaRN off) |
@@ -40,7 +47,7 @@ With no overrides, the script serves the model at its **native 262,144-token con
 | MTP speculative tokens | 4 |
 | Container name | `qwen38-flash-next` |
 
-`HF_TOKEN` has no default. If it is not exported, the script exits with an error.
+If `MODEL_DIR` has no `config.json`, the script exits with an error.
 
 Common variations:
 
@@ -49,7 +56,7 @@ MAX_MODEL_LEN=1000000 MAX_NUM_SEQS=1 ./run.sh   # ~1M context, YaRN factor 4.0
 MAX_NUM_SEQS=1 ./run.sh          # single user: lowest per-request latency, best MTP gain
 ```
 
-The **first launch** downloads the weights and runs kernel compilation and autotuning, so it can take **10–20+ minutes**. Later starts reuse the host caches and are much faster. The engine-ready timeout is set to 1 hour (`VLLM_ENGINE_READY_TIMEOUT_S=3600`) so the slow first start doesn't fail.
+The **first launch** runs kernel compilation and autotuning, so it can take **10–20+ minutes**. Later starts reuse the host caches and are much faster. The engine-ready timeout is set to 1 hour (`VLLM_ENGINE_READY_TIMEOUT_S=3600`) so the slow first start doesn't fail.
 
 When it is ready, test it:
 
@@ -69,8 +76,8 @@ Set any of these in the environment before you run `./run.sh`:
 
 | Variable                 | Default                                 | Description |
 |--------------------------|-----------------------------------------|-------------|
-| `HF_TOKEN`               | *(required)*                            | Hugging Face token passed into the container. The script exits with a clear error if it is unset. |
-| `MODEL_ID`               | `nvidia/Qwen3.8-Flash-Next-FP4-Local`   | Model repository to serve. |
+| `MODEL_DIR`              | `~/models/Qwen3.8-Flash-Next-FP4-Local` | Host directory with the model weights. Mounted read-only at `/models/model`. |
+| `MODEL_ID`               | `nvidia/Qwen3.8-Flash-Next-FP4-Local`   | Model name exposed by the API (`--served-model-name`). |
 | `IMAGE`                  | `eugr/spark-vllm-b12x:latest`           | Container image. |
 | `PORT`                   | `8000`                                  | API port. The container uses host networking. |
 | `HOST`                   | `0.0.0.0`                               | Bind address. |
@@ -138,11 +145,12 @@ If you set `YARN_FACTOR` yourself and `MAX_MODEL_LEN` is larger than the window 
 
 ### Persistent host caches
 
-Each cache directory is created on the host and mounted into the container, so later starts skip downloads and recompilation:
+The model directory and each cache directory are mounted into the container, so later starts skip recompilation:
 
 | Host path                   | Container path                | Contents |
 |-----------------------------|-------------------------------|----------|
-| `~/.cache/huggingface`      | `/root/.cache/huggingface`    | Model weights |
+| `$MODEL_DIR`                | `/models/model` (read-only)   | Model weights |
+| `~/.cache/huggingface`      | `/root/.cache/huggingface`    | Hugging Face cache (the hub runs offline, `HF_HUB_OFFLINE=1`) |
 | `~/.cache/vllm`             | `/root/.cache/vllm`           | vLLM compile / AOT artifacts |
 | `~/.cache/flashinfer`       | `/root/.cache/flashinfer`     | FlashInfer kernels |
 | `~/.triton`                 | `/root/.triton`               | Triton kernel cache |
@@ -152,6 +160,7 @@ Each cache directory is created on the host and mounted into the container, so l
 
 | Variable | Value | Purpose |
 |----------|-------|---------|
+| `HF_HUB_OFFLINE` | `1` | Load only from the local model directory, never from the Hub |
 | `VLLM_ALLOW_LONG_MAX_MODEL_LEN` | `1` | Allow context lengths above the model config (for YaRN) |
 | `VLLM_ENGINE_READY_TIMEOUT_S` | `3600` | Give the slow first start up to 1 h |
 | `VLLM_PLE_TABLE_MEMORY` | `disk` | Keep the PLE table on disk instead of in memory |
@@ -195,9 +204,9 @@ docker rm -f qwen38-flash-next         # remove
 
 ## Troubleshooting
 
-- **`ERROR: HF_TOKEN is not set`**: run `export HF_TOKEN=...` before `./run.sh`.
+- **`ERROR: no model found in MODEL_DIR`**: download the weights (see Quick start) or point `MODEL_DIR` at them.
 - **`ERROR: MAX_MODEL_LEN=... exceeds YaRN window`**: raise `YARN_FACTOR`, or unset it so the script computes one.
-- **Startup looks stuck**: the first run downloads about 96 GB and compiles kernels. Watch `./view.sh` and allow up to the 1 h ready timeout.
+- **Startup looks stuck**: the first run compiles kernels. Watch `./view.sh` and allow up to the 1 h ready timeout.
 - **Out of memory / KV cache too small**: lower `MAX_MODEL_LEN` or `MAX_NUM_SEQS`, or adjust `GPU_MEMORY_UTILIZATION`.
 - **Port already in use**: the container uses host networking, so pick another port with `PORT=...`.
 - **Speculative decoding problems**: run with `MTP_TOKENS=0` to rule it out.
